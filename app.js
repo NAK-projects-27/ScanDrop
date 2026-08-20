@@ -1,9 +1,4 @@
 /*
-  Private Scanner - client logic
-  ==============================
-  Talks ONLY to the local Python server (server.py) on your own network.
-  No Firebase, no cloud, no external database.
-
   Endpoints used:
     POST /api/scan       -> send a scan
     GET  /api/scans       -> poll for scans
@@ -20,12 +15,6 @@ let lastSeenId = 0;
 let pollTimer = null;
 let serverInfo = { ips: [], httpsPort: 8443, httpsEnabled: false };
 
-/*
-  Duplicate suppression.
-  html5-qrcode calls back on EVERY decoded frame (about 10 per second), so a
-  barcode held in front of the camera for a few seconds fires dozens of times.
-  We remember when each value was last accepted and ignore repeats.
-*/
 const scanMemory = new Map();   // decoded value -> timestamp it was last accepted
 let scansSent = 0;
 let dupesIgnored = 0;
@@ -128,12 +117,6 @@ function initFromUrl() {
   checkSecureContext();
 }
 
-/*
-  Phone browsers only expose the camera on a "secure context":
-  https://... or http://localhost. A page loaded from http://192.168.x.x
-  can never get the camera, no matter what permissions you grant.
-  This checks up front and points you at the https address instead.
-*/
 function cameraAvailable() {
   return Boolean(
     window.isSecureContext &&
@@ -450,8 +433,7 @@ function supportedFormats() {
 }
 
 /*
-  Photo-based scanning.
-  This uses the phone's normal camera app through <input type="file" capture>,
+  uses the phone's normal camera app through <input type="file" capture>,
   then decodes the still image in JavaScript. It needs NO camera permission and
   NO secure context, so it works fine over plain http.
 */
