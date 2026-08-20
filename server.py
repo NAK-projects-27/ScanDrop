@@ -14,13 +14,23 @@ Run:
 
 Then:
   - Laptop:  http://localhost:8000/?mode=laptop
-  - Phone:   http://<YOUR-LAPTOP-IP>:8000/?mode=phone
+  - Phone:   https://<YOUR-LAPTOP-IP>:8443/?mode=phone
              (the script prints your IP addresses on startup)
+
+The phone MUST use the https:// address. Phone browsers only hand the camera
+to pages served over https (or localhost), so plain http will always fail with
+"Camera access is only supported in secure context".
+
+The https certificate is generated locally by make_cert.py on first run using
+only the Python standard library. Your phone will show a "not private" warning
+once - tap through it (Show Details -> visit this website) and the camera works.
 
 Both devices must be on the SAME Wi-Fi / network (or the phone hotspot).
 
 Optional flags:
   python server.py --port 8000
+  python server.py --https-port 8443
+  python server.py --no-https    (disable https; camera will not work on phone)
   python server.py --save        (also append scans to scans_log.jsonl)
 """
 
@@ -29,6 +39,8 @@ import ipaddress
 import json
 import os
 import socket
+import ssl
+import sys
 import threading
 import time
 from datetime import datetime
@@ -44,6 +56,8 @@ NEXT_ID = {"n": 1}  # simple incrementing id
 
 SAVE_TO_FILE = False
 SAVE_PATH = "scans_log.jsonl"
+HTTPS_PORT = 8443
+HTTPS_ENABLED = False
 STATIC_DIR = os.path.dirname(os.path.abspath(__file__))
 MAX_SCANS_PER_ROOM = 500
 
@@ -166,7 +180,13 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/ping":
-            self._send_json({"ok": True, "time": int(time.time() * 1000)})
+            self._send_json({
+                "ok": True,
+                "time": int(time.time() * 1000),
+                "ips": get_local_ips(),
+                "httpsPort": HTTPS_PORT,
+                "httpsEnabled": HTTPS_ENABLED,
+            })
             return
 
         if path == "/":
@@ -203,6 +223,19 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send_json({"ok": False, "error": "Unknown endpoint"}, status=404)
+
+
+class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        # Browsers probing an https port with http (and vice versa) is normal
+        # noise - don't spam the console with tracebacks.
+        if isinstance(exc, (ssl.SSLError, ConnectionResetError, BrokenPipeError)):
+            return
+        ThreadingHTTPServer.handle_error(self, request, client_address)
 
 
 def _parse_query(q):
@@ -252,33 +285,69 @@ def get_local_ips():
 
 
 def main():
-    global SAVE_TO_FILE
+    global SAVE_TO_FILE, HTTPS_PORT, HTTPS_ENABLED
 
     parser = argparse.ArgumentParser(description="Private phone-to-laptop scanner server")
-    parser.add_argument("--port", type=int, default=8000, help="Port to listen on (default 8000)")
+    parser.add_argument("--port", type=int, default=8000, help="Plain http port (default 8000)")
+    parser.add_argument("--https-port", type=int, default=8443, help="Https port (default 8443)")
+    parser.add_argument("--no-https", action="store_true", help="Disable https (phone camera will not work)")
     parser.add_argument("--save", action="store_true", help="Also append scans to scans_log.jsonl")
     args = parser.parse_args()
 
     SAVE_TO_FILE = args.save
+    HTTPS_PORT = args.https_port
 
-    server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
+    http_server = QuietThreadingHTTPServer(("0.0.0.0", args.port), Handler)
+
+    https_server = None
+    https_error = None
+
+    if not args.no_https:
+        try:
+            import make_cert
+            cert_path, key_path = make_cert.ensure_cert()
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(cert_path, key_path)
+
+            https_server = QuietThreadingHTTPServer(("0.0.0.0", args.https_port), Handler)
+            https_server.socket = context.wrap_socket(https_server.socket, server_side=True)
+            HTTPS_ENABLED = True
+        except Exception as e:
+            https_error = e
+            https_server = None
 
     ips = get_local_ips()
 
-    print("=" * 60)
-    print("  PRIVATE SCANNER SERVER RUNNING")
+    print("=" * 62)
+    print("  SCANDROP SERVER RUNNING")
     print("  All data stays on your machine / local network.")
-    print("=" * 60)
+    print("=" * 62)
     print()
     print("On THIS laptop, open:")
     print("   http://localhost:%d/?mode=laptop" % args.port)
     print()
-    print("On your PHONE (same Wi-Fi / hotspot), open ONE of these:")
-    if ips:
-        for ip in ips:
-            print("   http://%s:%d/?mode=phone" % (ip, args.port))
+
+    if https_server:
+        print("On your PHONE (same Wi-Fi / hotspot), open ONE of these:")
+        if ips:
+            for ip in ips:
+                print("   https://%s:%d/?mode=phone" % (ip, args.https_port))
+        else:
+            print("   https://<your-laptop-ip>:%d/?mode=phone" % args.https_port)
+        print()
+        print("   ^ note the https and the port %d - the camera ONLY works on https." % args.https_port)
+        print("   Your phone will warn that the certificate is not trusted.")
+        print("   Safari:  Show Details -> visit this website -> Visit Website")
+        print("   Chrome:  Advanced -> Proceed")
+        print("   That warning is expected - the certificate was made on this laptop.")
     else:
-        print("   http://<your-laptop-ip>:%d/?mode=phone" % args.port)
+        print("HTTPS IS OFF - the phone camera will NOT work.")
+        if https_error:
+            print("Reason: %s" % https_error)
+        print("Phone can still use photo scanning / OCR over:")
+        if ips:
+            for ip in ips:
+                print("   http://%s:%d/?mode=phone" % (ip, args.port))
     print()
     print("Tip: use the same Room code on phone and laptop.")
     if SAVE_TO_FILE:
@@ -288,11 +357,16 @@ def main():
     print("Started at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print()
 
+    if https_server:
+        threading.Thread(target=https_server.serve_forever, daemon=True).start()
+
     try:
-        server.serve_forever()
+        http_server.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down. Scan data in memory is cleared.")
-        server.shutdown()
+        http_server.shutdown()
+        if https_server:
+            https_server.shutdown()
 
 
 if __name__ == "__main__":
