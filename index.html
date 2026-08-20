@@ -52,6 +52,7 @@
       </div>
 
       <p id="connectionStatus" class="status">Not connected.</p>
+      <p id="phoneLinkBox" class="status ok hidden"></p>
     </div>
 
     <!-- PHONE VIEW -->
@@ -61,9 +62,34 @@
         Scan QR/barcodes, capture an image, or OCR text from a label or document.
       </p>
 
+      <p id="secureWarning" class="status warn hidden"></p>
+
       <div class="row">
         <button id="startScannerBtn" class="success">Start QR/barcode scanner</button>
         <button id="stopScannerBtn" class="danger">Stop scanner</button>
+        <button id="resumeScannerBtn" class="secondary hidden">Resume scanning</button>
+      </div>
+
+      <div style="margin-top: 14px;">
+        <label for="dupeMode">Repeat scan handling</label>
+        <select id="dupeMode">
+          <option value="2000">Same code: ignore repeats for 2 seconds</option>
+          <option value="3000" selected>Same code: ignore repeats for 3 seconds</option>
+          <option value="8000">Same code: ignore repeats for 8 seconds</option>
+          <option value="once">Same code: send only once per session</option>
+          <option value="0">Off - send every frame (not recommended)</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label class="checkline" for="pauseAfterScan">
+          <input type="checkbox" id="pauseAfterScan" />
+          Pause camera after each scan
+        </label>
+        <label class="checkline" for="beepOnScan">
+          <input type="checkbox" id="beepOnScan" checked />
+          Beep on scan
+        </label>
       </div>
 
       <div id="reader"></div>
@@ -81,11 +107,31 @@
       <h3>Capture image / label / document</h3>
       <p class="small">
         Use this for labels, docs, packing slips, damage photos, or serial labels.
+        <b>Scan barcode from photo</b> works even over plain http, so use it if the
+        live camera is blocked.
       </p>
 
       <input id="imageInput" type="file" accept="image/*" capture="environment" />
 
+      <div style="margin-top: 14px;">
+        <label for="ocrLayout">Text layout on the image</label>
+        <select id="ocrLayout">
+          <option value="6" selected>Block of text (labels, packing slips)</option>
+          <option value="4">Column of text, mixed sizes</option>
+          <option value="11">Text scattered around the page</option>
+          <option value="7">One single line only</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label class="checkline" for="enhanceOcr">
+          <input type="checkbox" id="enhanceOcr" checked />
+          Clean up image before OCR (recommended)
+        </label>
+      </div>
+
       <div class="row image-buttons">
+        <button id="scanPhotoBtn" class="success">Scan barcode from photo</button>
         <button id="sendImageBtn">Send image only</button>
         <button id="ocrImageBtn" class="warning">OCR image and send text</button>
         <button id="sendImageAndOcrBtn" class="success">Send image + OCR text</button>
