@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ScanDrop</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- Styles (relative path, matches your file name style.css) -->
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- QR / Barcode scanner library -->
+  <script src="https://unpkg.com/html5-qrcode"></script>
+
+  <!-- OCR library for labels / docs / images -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+</head>
+
+<body>
+  <header>
+    <h1>ScanDrop</h1>
+    <p>Runs on your own network only. Scan QR codes, barcodes, labels, docs, and images.</p>
+  </header>
+
+  <main>
+    <div class="card">
+      <div class="grid two">
+        <div>
+          <label for="modeSelect">Mode</label>
+          <select id="modeSelect">
+            <option value="phone">Phone scanner</option>
+            <option value="laptop">Laptop receiver</option>
+          </select>
+          <p class="small">
+            Use <b>Phone scanner</b> on your phone and <b>Laptop receiver</b> on your laptop. Both must be on the same Wi-Fi (or the phone hotspot).
+          </p>
+        </div>
+
+        <div>
+          <label for="roomInput">Room code</label>
+          <input id="roomInput" placeholder="Example: scanner-001" />
+          <p class="small">
+            Use the same room code on phone and laptop.
+          </p>
+        </div>
+      </div>
+
+      <div class="row">
+        <button id="connectBtn">Connect</button>
+        <button id="copyPhoneLinkBtn" class="secondary">Copy phone link</button>
+        <button id="copyLaptopLinkBtn" class="secondary">Copy laptop link</button>
+        <button id="clearRoomBtn" class="danger">Clear room results</button>
+      </div>
+
+      <p id="connectionStatus" class="status">Not connected.</p>
+    </div>
+
+    <!-- PHONE VIEW -->
+    <section id="phoneView" class="card hidden">
+      <h2>Phone scanner</h2>
+      <p class="small">
+        Scan QR/barcodes, capture an image, or OCR text from a label or document.
+      </p>
+
+      <div class="row">
+        <button id="startScannerBtn" class="success">Start QR/barcode scanner</button>
+        <button id="stopScannerBtn" class="danger">Stop scanner</button>
+      </div>
+
+      <div id="reader"></div>
+
+      <hr />
+
+      <h3>Send manual text</h3>
+      <textarea id="manualText" placeholder="Type or paste anything here, then send to laptop..."></textarea>
+      <div class="row">
+        <button id="sendTextBtn">Send text</button>
+      </div>
+
+      <hr />
+
+      <h3>Capture image / label / document</h3>
+      <p class="small">
+        Use this for labels, docs, packing slips, damage photos, or serial labels.
+      </p>
+
+      <input id="imageInput" type="file" accept="image/*" capture="environment" />
+
+      <div class="row image-buttons">
+        <button id="sendImageBtn">Send image only</button>
+        <button id="ocrImageBtn" class="warning">OCR image and send text</button>
+        <button id="sendImageAndOcrBtn" class="success">Send image + OCR text</button>
+      </div>
+
+      <p id="phoneStatus" class="status">Ready.</p>
+
+      <div id="imagePreviewWrap" class="hidden">
+        <h3>Image preview</h3>
+        <img id="imagePreview" class="result-img" alt="Preview" />
+      </div>
+    </section>
+
+    <!-- LAPTOP VIEW -->
+    <section id="laptopView" class="card hidden">
+      <h2>Laptop receiver</h2>
+      <p class="small">
+        Results from your phone appear here live. Copy the latest value, then paste into Notepad, Excel, or a web/WMS screen.
+      </p>
+
+      <div class="row">
+        <button id="copyLatestBtn" class="success">Copy latest result</button>
+        <button id="downloadCsvBtn" class="secondary">Download CSV</button>
+        <button id="downloadTextBtn" class="secondary">Download TXT</button>
+      </div>
+
+      <p id="laptopStatus" class="status">Waiting for scans.</p>
+
+      <h3>Latest result</h3>
+      <textarea id="latestBox" readonly placeholder="Latest scan will appear here..."></textarea>
+
+      <h3>All results</h3>
+      <div id="results"></div>
+    </section>
+  </main>
+
+  <!-- Local app logic (NOT a module) -->
+  <script src="app.js"></script>
+</body>
+</html>
