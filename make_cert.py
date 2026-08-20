@@ -3,16 +3,9 @@
 make_cert.py - Create a self-signed HTTPS certificate using ONLY the Python
 standard library. No pip, no OpenSSL, no admin rights needed.
 
-Why this exists:
-  Phone browsers refuse to give a web page the camera unless the page is on
-  https:// (or localhost). Serving ScanDrop over https with this certificate
-  makes the camera work on your phone.
-
 Usage:
   python make_cert.py            -> writes cert.pem and key.pem next to this file
   python make_cert.py --force    -> regenerate even if they already exist
-
-Everything stays local. The key never leaves your machine.
 """
 
 import argparse
