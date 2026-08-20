@@ -481,3 +481,25 @@ hr {
   background: linear-gradient(var(--cyan), var(--violet));
   border-radius: 10px;
 }
+
+/* Inline checkbox rows (scanner options) */
+.checkline {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  letter-spacing: 0.5px;
+  text-transform: none;
+  cursor: pointer;
+}
+
+.checkline input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--cyan);
+  cursor: pointer;
+}
