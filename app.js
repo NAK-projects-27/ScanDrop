@@ -18,6 +18,19 @@ let latestPlainText = "";
 let allResults = [];
 let lastSeenId = 0;
 let pollTimer = null;
+let serverInfo = { ips: [], httpsPort: 8443, httpsEnabled: false };
+
+/*
+  Duplicate suppression.
+  html5-qrcode calls back on EVERY decoded frame (about 10 per second), so a
+  barcode held in front of the camera for a few seconds fires dozens of times.
+  We remember when each value was last accepted and ignore repeats.
+*/
+const scanMemory = new Map();   // decoded value -> timestamp it was last accepted
+let scansSent = 0;
+let dupesIgnored = 0;
+let scannerPaused = false;
+let audioCtx = null;
 
 const els = {
   modeSelect: document.getElementById("modeSelect"),
@@ -33,10 +46,20 @@ const els = {
 
   startScannerBtn: document.getElementById("startScannerBtn"),
   stopScannerBtn: document.getElementById("stopScannerBtn"),
+  resumeScannerBtn: document.getElementById("resumeScannerBtn"),
+  dupeMode: document.getElementById("dupeMode"),
+  pauseAfterScan: document.getElementById("pauseAfterScan"),
+  beepOnScan: document.getElementById("beepOnScan"),
   manualText: document.getElementById("manualText"),
   sendTextBtn: document.getElementById("sendTextBtn"),
 
+  secureWarning: document.getElementById("secureWarning"),
+  phoneLinkBox: document.getElementById("phoneLinkBox"),
+
   imageInput: document.getElementById("imageInput"),
+  enhanceOcr: document.getElementById("enhanceOcr"),
+  ocrLayout: document.getElementById("ocrLayout"),
+  scanPhotoBtn: document.getElementById("scanPhotoBtn"),
   sendImageBtn: document.getElementById("sendImageBtn"),
   ocrImageBtn: document.getElementById("ocrImageBtn"),
   sendImageAndOcrBtn: document.getElementById("sendImageAndOcrBtn"),
@@ -67,9 +90,15 @@ els.clearRoomBtn.addEventListener("click", clearRoom);
 
 els.startScannerBtn.addEventListener("click", startScanner);
 els.stopScannerBtn.addEventListener("click", stopScanner);
+els.resumeScannerBtn.addEventListener("click", resumeScanner);
+els.dupeMode.addEventListener("change", () => {
+  scanMemory.clear();
+  setStatus(els.phoneStatus, "Duplicate rule changed. Memory cleared.", "warn");
+});
 els.sendTextBtn.addEventListener("click", sendManualText);
 
 els.imageInput.addEventListener("change", previewSelectedImage);
+els.scanPhotoBtn.addEventListener("click", scanPhotoForCode);
 els.sendImageBtn.addEventListener("click", sendImageOnly);
 els.ocrImageBtn.addEventListener("click", ocrImageOnly);
 els.sendImageAndOcrBtn.addEventListener("click", sendImageAndOcr);
@@ -96,6 +125,45 @@ function initFromUrl() {
   }
 
   showMode();
+  checkSecureContext();
+}
+
+/*
+  Phone browsers only expose the camera on a "secure context":
+  https://... or http://localhost. A page loaded from http://192.168.x.x
+  can never get the camera, no matter what permissions you grant.
+  This checks up front and points you at the https address instead.
+*/
+function cameraAvailable() {
+  return Boolean(
+    window.isSecureContext &&
+    navigator.mediaDevices &&
+    navigator.mediaDevices.getUserMedia
+  );
+}
+
+function checkSecureContext() {
+  if (!els.secureWarning) return;
+
+  if (cameraAvailable()) {
+    els.secureWarning.classList.add("hidden");
+    els.startScannerBtn.disabled = false;
+    return;
+  }
+
+  els.secureWarning.classList.remove("hidden");
+  els.startScannerBtn.disabled = true;
+
+  const host = window.location.hostname;
+  const httpsUrl =
+    "https://" + host + ":" + serverInfo.httpsPort + window.location.search;
+
+  els.secureWarning.innerHTML =
+    "Live camera is blocked because this page was opened over <b>http</b>. " +
+    "Open the <b>https</b> address instead: <br><b>" +
+    httpsUrl +
+    "</b><br>Accept the certificate warning once, then the camera works. " +
+    "Until then, use <b>Scan barcode from photo</b> below - that works over http.";
 }
 
 function makeDefaultRoom() {
@@ -142,6 +210,20 @@ async function connect() {
   try {
     const res = await fetch("/api/ping");
     if (!res.ok) throw new Error("ping failed");
+
+    try {
+      const info = await res.json();
+      if (info && typeof info === "object") {
+        serverInfo.ips = info.ips || [];
+        serverInfo.httpsPort = info.httpsPort || 8443;
+        serverInfo.httpsEnabled = Boolean(info.httpsEnabled);
+      }
+    } catch (e) {
+      /* older server, ignore */
+    }
+
+    checkSecureContext();
+    showPhoneLink();
 
     connected = true;
     lastSeenId = 0;
@@ -224,6 +306,228 @@ async function sendScan(payload) {
   }
 }
 
+/*
+  Returns true if this decoded value should actually be sent.
+  Called synchronously on every decoded frame, before any await, so two frames
+  can never slip through together.
+*/
+function shouldAcceptScan(value) {
+  const mode = els.dupeMode ? els.dupeMode.value : "3000";
+  if (mode === "0") return true;
+
+  const now = Date.now();
+  const lastAccepted = scanMemory.get(value) || 0;
+
+  if (mode === "once") {
+    if (scanMemory.has(value)) return false;
+    scanMemory.set(value, now);
+    return true;
+  }
+
+  const windowMs = parseInt(mode, 10) || 3000;
+
+  if (lastAccepted && now - lastAccepted < windowMs) {
+    // Push the timestamp forward, so holding the code in frame keeps it
+    // suppressed instead of firing again every few seconds.
+    scanMemory.set(value, now);
+    return false;
+  }
+
+  scanMemory.set(value, now);
+  return true;
+}
+
+function ensureAudio() {
+  try {
+    if (audioCtx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audioCtx = new AC();
+  } catch (e) {
+    audioCtx = null;
+  }
+}
+
+function beep() {
+  if (els.beepOnScan && !els.beepOnScan.checked) return;
+
+  try {
+    if (navigator.vibrate) navigator.vibrate(60);
+  } catch (e) {
+    /* not supported on iOS */
+  }
+
+  try {
+    ensureAudio();
+    if (!audioCtx) return;
+    if (audioCtx.state === "suspended") audioCtx.resume();
+
+    const t = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+
+    osc.type = "square";
+    osc.frequency.value = 880;
+
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.22, t + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.15);
+  } catch (e) {
+    /* audio is a nicety, never break scanning over it */
+  }
+}
+
+async function onCodeDecoded(decodedText, decodedResult) {
+  if (!shouldAcceptScan(decodedText)) {
+    dupesIgnored++;
+    return;
+  }
+
+  beep();
+  scansSent++;
+
+  // Optionally freeze the camera so one scan means one item.
+  if (els.pauseAfterScan && els.pauseAfterScan.checked && scanner) {
+    try {
+      scanner.pause(true);
+      scannerPaused = true;
+      els.resumeScannerBtn.classList.remove("hidden");
+    } catch (e) {
+      /* older library version without pause() */
+    }
+  }
+
+  const format =
+    decodedResult && decodedResult.result && decodedResult.result.format
+      ? decodedResult.result.format.formatName
+      : "Unknown";
+
+  await sendScan({ type: "barcode_or_qr", value: decodedText, format: format });
+
+  let msg = "Sent #" + scansSent + ": " + decodedText;
+  if (dupesIgnored) msg += "  (" + dupesIgnored + " repeats ignored)";
+  if (scannerPaused) msg += "  - paused, tap Resume for the next item.";
+
+  setStatus(els.phoneStatus, msg, "ok");
+}
+
+async function resumeScanner() {
+  if (!scanner || !scannerPaused) return;
+
+  try {
+    scanner.resume();
+    scannerPaused = false;
+    els.resumeScannerBtn.classList.add("hidden");
+    setStatus(els.phoneStatus, "Scanner running.", "ok");
+  } catch (err) {
+    console.error(err);
+    setStatus(els.phoneStatus, "Could not resume. Stop and start the scanner.", "bad");
+  }
+}
+
+function supportedFormats() {
+  if (!window.Html5QrcodeSupportedFormats) return undefined;
+
+  return [
+    Html5QrcodeSupportedFormats.QR_CODE,
+    Html5QrcodeSupportedFormats.CODE_128,
+    Html5QrcodeSupportedFormats.CODE_39,
+    Html5QrcodeSupportedFormats.CODE_93,
+    Html5QrcodeSupportedFormats.EAN_13,
+    Html5QrcodeSupportedFormats.EAN_8,
+    Html5QrcodeSupportedFormats.UPC_A,
+    Html5QrcodeSupportedFormats.UPC_E,
+    Html5QrcodeSupportedFormats.ITF,
+    Html5QrcodeSupportedFormats.DATA_MATRIX,
+    Html5QrcodeSupportedFormats.PDF_417,
+    Html5QrcodeSupportedFormats.AZTEC
+  ];
+}
+
+/*
+  Photo-based scanning.
+  This uses the phone's normal camera app through <input type="file" capture>,
+  then decodes the still image in JavaScript. It needs NO camera permission and
+  NO secure context, so it works fine over plain http.
+*/
+async function scanPhotoForCode() {
+  const file = selectedImageFile();
+  if (!file) return;
+
+  if (!connected) {
+    setStatus(els.phoneStatus, "Click Connect first.", "bad");
+    return;
+  }
+
+  if (!window.Html5Qrcode) {
+    setStatus(els.phoneStatus, "Scanner library did not load.", "bad");
+    return;
+  }
+
+  setStatus(els.phoneStatus, "Looking for a barcode in that photo...", "warn");
+
+  let fileScanner = null;
+
+  try {
+    if (scannerRunning) await stopScanner();
+
+    fileScanner = new Html5Qrcode("reader", {
+      formatsToSupport: supportedFormats(),
+      verbose: false
+    });
+
+    const decodedText = await fileScanner.scanFile(file, true);
+
+    await sendScan({
+      type: "barcode_or_qr",
+      value: decodedText,
+      format: "from photo"
+    });
+
+    setStatus(els.phoneStatus, "Code found and sent: " + decodedText, "ok");
+  } catch (err) {
+    console.error(err);
+    setStatus(
+      els.phoneStatus,
+      "No readable code in that photo. Get closer, hold steady, and make sure the whole code is in frame.",
+      "bad"
+    );
+  } finally {
+    if (fileScanner) {
+      try {
+        await fileScanner.clear();
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+}
+
+function showPhoneLink() {
+  if (!els.phoneLinkBox) return;
+
+  const room = cleanRoomCode(els.roomInput.value);
+  const ip = (serverInfo.ips || []).find((x) => x !== "127.0.0.1");
+
+  if (!ip || !serverInfo.httpsEnabled) {
+    els.phoneLinkBox.classList.add("hidden");
+    return;
+  }
+
+  const url =
+    "https://" + ip + ":" + serverInfo.httpsPort +
+    "/?mode=phone&room=" + encodeURIComponent(room);
+
+  els.phoneLinkBox.classList.remove("hidden");
+  els.phoneLinkBox.innerHTML =
+    "Open this on your phone (camera-enabled): <b>" + url + "</b>";
+}
+
 async function startScanner() {
   if (scannerRunning) return;
 
@@ -241,24 +545,20 @@ async function startScanner() {
     return;
   }
 
-  try {
-    const formats = [
-      Html5QrcodeSupportedFormats.QR_CODE,
-      Html5QrcodeSupportedFormats.CODE_128,
-      Html5QrcodeSupportedFormats.CODE_39,
-      Html5QrcodeSupportedFormats.CODE_93,
-      Html5QrcodeSupportedFormats.EAN_13,
-      Html5QrcodeSupportedFormats.EAN_8,
-      Html5QrcodeSupportedFormats.UPC_A,
-      Html5QrcodeSupportedFormats.UPC_E,
-      Html5QrcodeSupportedFormats.ITF,
-      Html5QrcodeSupportedFormats.DATA_MATRIX,
-      Html5QrcodeSupportedFormats.PDF_417,
-      Html5QrcodeSupportedFormats.AZTEC
-    ];
+  if (!cameraAvailable()) {
+    checkSecureContext();
+    setStatus(
+      els.phoneStatus,
+      "Live camera needs https. Open the https address shown above, or use " +
+      "\"Scan barcode from photo\" instead.",
+      "bad"
+    );
+    return;
+  }
 
+  try {
     scanner = new Html5Qrcode("reader", {
-      formatsToSupport: formats,
+      formatsToSupport: supportedFormats(),
       verbose: false
     });
 
@@ -292,22 +592,17 @@ console.log("Using camera:", cameraId);
 await scanner.start(
   cameraId,
   config,
-  async (decodedText, decodedResult) => {
-    await sendScan({
-      type: "barcode_or_qr",
-      value: decodedText,
-      format:
-        decodedResult &&
-        decodedResult.result &&
-        decodedResult.result.format
-          ? decodedResult.result.format.formatName
-          : "Unknown"
-    });
-  },
+  onCodeDecoded,
   () => {}
 );
 
     scannerRunning = true;
+    scannerPaused = false;
+    scansSent = 0;
+    dupesIgnored = 0;
+    scanMemory.clear();
+    ensureAudio();
+    els.resumeScannerBtn.classList.add("hidden");
     setStatus(els.phoneStatus, "Scanner running.", "ok");
   } catch (err) {
       console.error("Camera Error:", err);
@@ -328,6 +623,8 @@ async function stopScanner() {
 
     scanner = null;
     scannerRunning = false;
+    scannerPaused = false;
+    els.resumeScannerBtn.classList.add("hidden");
     setStatus(els.phoneStatus, "Scanner stopped.", "warn");
   } catch (err) {
     console.error(err);
@@ -473,17 +770,295 @@ function fileToCompressedDataUrl(file, maxWidth, quality) {
   });
 }
 
-async function runOcr(file) {
-  const result = await Tesseract.recognize(file, "eng", {
-    logger: (m) => {
-      if (m.status && typeof m.progress === "number") {
-        const pct = Math.round(m.progress * 100);
-        setStatus(els.phoneStatus, "OCR: " + m.status + " " + pct + "%", "warn");
+/* ============================================================
+   OCR IMAGE PREPROCESSING
+   A phone photo of a label is usually dim and uneven, with a lot of
+   background in frame. Feeding that straight to Tesseract produces noise.
+   Pipeline: load (EXIF-safe) -> grayscale -> auto-crop to the paper ->
+   upscale small text -> local adaptive threshold -> clean black on white.
+   ============================================================ */
+
+async function loadBitmap(file) {
+  if (window.createImageBitmap) {
+    try {
+      return await createImageBitmap(file, { imageOrientation: "from-image" });
+    } catch (e) {
+      /* Safari without the option - fall through */
+    }
+    try {
+      return await createImageBitmap(file);
+    } catch (e) {
+      /* fall through */
+    }
+  }
+
+  return await new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = (e) => {
+      URL.revokeObjectURL(url);
+      reject(e);
+    };
+    img.src = url;
+  });
+}
+
+function grayFromImageData(data, length) {
+  const gray = new Uint8ClampedArray(length);
+  for (let i = 0, p = 0; i < length; i++, p += 4) {
+    gray[i] = (data[p] * 0.299 + data[p + 1] * 0.587 + data[p + 2] * 0.114) | 0;
+  }
+  return gray;
+}
+
+function otsuThreshold(gray) {
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < gray.length; i++) hist[gray[i]]++;
+
+  const total = gray.length;
+  let sumAll = 0;
+  for (let i = 0; i < 256; i++) sumAll += i * hist[i];
+
+  let sumB = 0;
+  let wB = 0;
+  let best = 0;
+  let threshold = 128;
+
+  for (let i = 0; i < 256; i++) {
+    wB += hist[i];
+    if (wB === 0) continue;
+    const wF = total - wB;
+    if (wF === 0) break;
+
+    sumB += i * hist[i];
+    const between = wB * wF * Math.pow(sumB / wB - (sumAll - sumB) / wF, 2);
+    if (between > best) {
+      best = between;
+      threshold = i;
+    }
+  }
+  return threshold;
+}
+
+/* Find the bright paper/label region so we don't OCR the desk or floor. */
+function findBrightRegion(gray, w, h) {
+  const t = otsuThreshold(gray);
+
+  const rowFrac = new Float32Array(h);
+  const colFrac = new Float32Array(w);
+
+  for (let y = 0; y < h; y++) {
+    let count = 0;
+    const off = y * w;
+    for (let x = 0; x < w; x++) {
+      if (gray[off + x] > t) {
+        count++;
+        colFrac[x] += 1;
       }
     }
-  });
+    rowFrac[y] = count / w;
+  }
+  for (let x = 0; x < w; x++) colFrac[x] /= h;
 
-  return (result && result.data && result.data.text) ? result.data.text : "";
+  const span = (arr, n) => {
+    let lo = -1;
+    let hi = -1;
+    for (let i = 0; i < n; i++) {
+      if (arr[i] > 0.4) {
+        if (lo < 0) lo = i;
+        hi = i;
+      }
+    }
+    return [lo, hi];
+  };
+
+  const [y0, y1] = span(rowFrac, h);
+  const [x0, x1] = span(colFrac, w);
+
+  if (y0 < 0 || x0 < 0) return { x: 0, y: 0, w: w, h: h };
+
+  const bw = x1 - x0;
+  const bh = y1 - y0;
+
+  // Only trust the crop if it keeps a meaningful chunk of the frame.
+  if (bw * bh < w * h * 0.12) return { x: 0, y: 0, w: w, h: h };
+
+  return { x: x0, y: y0, w: bw, h: bh };
+}
+
+/* Bradley-Roth adaptive threshold via integral image - handles uneven light. */
+function adaptiveThreshold(gray, w, h, windowSize, tolerance) {
+  const integral = new Float64Array((w + 1) * (h + 1));
+
+  for (let y = 0; y < h; y++) {
+    let rowSum = 0;
+    for (let x = 0; x < w; x++) {
+      rowSum += gray[y * w + x];
+      integral[(y + 1) * (w + 1) + (x + 1)] =
+        integral[y * (w + 1) + (x + 1)] + rowSum;
+    }
+  }
+
+  const half = windowSize >> 1;
+  const out = new Uint8ClampedArray(w * h);
+
+  for (let y = 0; y < h; y++) {
+    const y1 = Math.max(0, y - half);
+    const y2 = Math.min(h - 1, y + half);
+
+    for (let x = 0; x < w; x++) {
+      const x1 = Math.max(0, x - half);
+      const x2 = Math.min(w - 1, x + half);
+      const area = (y2 - y1 + 1) * (x2 - x1 + 1);
+
+      const sum =
+        integral[(y2 + 1) * (w + 1) + (x2 + 1)] -
+        integral[y1 * (w + 1) + (x2 + 1)] -
+        integral[(y2 + 1) * (w + 1) + x1] +
+        integral[y1 * (w + 1) + x1];
+
+      out[y * w + x] =
+        gray[y * w + x] * area > sum * (1 - tolerance) ? 255 : 0;
+    }
+  }
+  return out;
+}
+
+async function prepareImageForOcr(file) {
+  const bmp = await loadBitmap(file);
+  const srcW = bmp.width || bmp.naturalWidth;
+  const srcH = bmp.height || bmp.naturalHeight;
+
+  // Stage 1: downscale to something a phone can process quickly.
+  const maxDim = 2000;
+  const s = Math.min(1, maxDim / Math.max(srcW, srcH));
+  const w = Math.max(1, Math.round(srcW * s));
+  const h = Math.max(1, Math.round(srcH * s));
+
+  const c1 = document.createElement("canvas");
+  c1.width = w;
+  c1.height = h;
+  const ctx1 = c1.getContext("2d", { willReadFrequently: true });
+  ctx1.drawImage(bmp, 0, 0, w, h);
+  if (bmp.close) bmp.close();
+
+  const gray1 = grayFromImageData(ctx1.getImageData(0, 0, w, h).data, w * h);
+
+  // Stage 2: crop to the paper.
+  const box = findBrightRegion(gray1, w, h);
+
+  // Stage 3: redraw the crop, upscaling if the text would be small.
+  const upscale = Math.min(2.5, Math.max(1, 1400 / box.w));
+  const tw = Math.round(box.w * upscale);
+  const th = Math.round(box.h * upscale);
+
+  const c2 = document.createElement("canvas");
+  c2.width = tw;
+  c2.height = th;
+  const ctx2 = c2.getContext("2d", { willReadFrequently: true });
+  ctx2.imageSmoothingEnabled = true;
+  ctx2.imageSmoothingQuality = "high";
+  ctx2.drawImage(c1, box.x, box.y, box.w, box.h, 0, 0, tw, th);
+
+  // Stage 4: adaptive threshold.
+  const imgData = ctx2.getImageData(0, 0, tw, th);
+  const gray2 = grayFromImageData(imgData.data, tw * th);
+
+  let win = Math.max(15, Math.floor(tw / 20));
+  if (win % 2 === 0) win += 1;
+
+  const bw = adaptiveThreshold(gray2, tw, th, win, 0.15);
+
+  for (let i = 0, p = 0; i < bw.length; i++, p += 4) {
+    imgData.data[p] = bw[i];
+    imgData.data[p + 1] = bw[i];
+    imgData.data[p + 2] = bw[i];
+    imgData.data[p + 3] = 255;
+  }
+  ctx2.putImageData(imgData, 0, 0);
+
+  return c2;
+}
+
+async function ocrPass(image, psm) {
+  const logger = (m) => {
+    if (m && m.status && typeof m.progress === "number") {
+      setStatus(
+        els.phoneStatus,
+        "OCR: " + m.status + " " + Math.round(m.progress * 100) + "%",
+        "warn"
+      );
+    }
+  };
+
+  if (Tesseract.createWorker) {
+    const worker = await Tesseract.createWorker("eng", 1, { logger: logger });
+    try {
+      await worker.setParameters({
+        tessedit_pageseg_mode: String(psm),
+        preserve_interword_spaces: "1",
+        user_defined_dpi: "300"
+      });
+      const out = await worker.recognize(image);
+      return {
+        text: (out && out.data && out.data.text) || "",
+        confidence: (out && out.data && out.data.confidence) || 0
+      };
+    } finally {
+      try {
+        await worker.terminate();
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+
+  const res = await Tesseract.recognize(image, "eng", { logger: logger });
+  return {
+    text: (res && res.data && res.data.text) || "",
+    confidence: (res && res.data && res.data.confidence) || 0
+  };
+}
+
+async function runOcr(file) {
+  let input = file;
+
+  if (!els.enhanceOcr || els.enhanceOcr.checked) {
+    setStatus(els.phoneStatus, "Cleaning up the image...", "warn");
+    try {
+      const canvas = await prepareImageForOcr(file);
+      input = canvas;
+
+      // Show what Tesseract is actually reading - makes bad photos obvious.
+      els.imagePreview.src = canvas.toDataURL("image/png");
+      els.imagePreviewWrap.classList.remove("hidden");
+    } catch (err) {
+      console.error("Preprocessing failed, using original image:", err);
+      input = file;
+    }
+  }
+
+  const psm = els.ocrLayout ? els.ocrLayout.value : "6";
+  let best = await ocrPass(input, psm);
+
+  // Low confidence usually means the layout mode was wrong - try once more.
+  if (best.confidence < 65) {
+    const fallback = psm === "6" ? "4" : "6";
+    setStatus(els.phoneStatus, "Low confidence, retrying with another layout...", "warn");
+    try {
+      const alt = await ocrPass(input, fallback);
+      if (alt.confidence > best.confidence) best = alt;
+    } catch (e) {
+      /* keep the first result */
+    }
+  }
+
+  console.log("OCR confidence:", Math.round(best.confidence));
+  return best.text;
 }
 
 function renderResults(rows) {
@@ -656,10 +1231,21 @@ async function copyModeLink(mode) {
   url.searchParams.set("room", room);
   url.searchParams.set("mode", mode);
 
+  // The phone needs the https address on the LAN IP, not localhost/http,
+  // otherwise the camera stays blocked.
+  if (mode === "phone" && serverInfo.httpsEnabled) {
+    const ip = (serverInfo.ips || []).find((x) => x !== "127.0.0.1");
+    if (ip) {
+      url.protocol = "https:";
+      url.hostname = ip;
+      url.port = String(serverInfo.httpsPort);
+    }
+  }
+
   await copyText(url.toString());
 
   if (mode === "phone") {
-    setStatus(els.connectionStatus, "Phone link copied. Open it on your phone (same Wi-Fi).", "ok");
+    setStatus(els.connectionStatus, "Phone link copied: " + url.toString(), "ok");
   } else {
     setStatus(els.connectionStatus, "Laptop link copied.", "ok");
   }
