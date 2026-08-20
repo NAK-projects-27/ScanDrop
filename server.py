@@ -1,38 +1,4 @@
 #!/usr/bin/env python3
-"""
-Private Phone -> Laptop Scanner Server
-======================================
-
-Everything stays on your own machine / local network.
-No cloud, no Firebase, no accounts, no external database.
-
-Requirements:
-  - Python 3.7+ (you have 3.13). Standard library only.
-
-Run:
-  python server.py
-
-Then:
-  - Laptop:  http://localhost:8000/?mode=laptop
-  - Phone:   https://<YOUR-LAPTOP-IP>:8443/?mode=phone
-             (the script prints your IP addresses on startup)
-
-The phone MUST use the https:// address. Phone browsers only hand the camera
-to pages served over https (or localhost), so plain http will always fail with
-"Camera access is only supported in secure context".
-
-The https certificate is generated locally by make_cert.py on first run using
-only the Python standard library. Your phone will show a "not private" warning
-once - tap through it (Show Details -> visit this website) and the camera works.
-
-Both devices must be on the SAME Wi-Fi / network (or the phone hotspot).
-
-Optional flags:
-  python server.py --port 8000
-  python server.py --https-port 8443
-  python server.py --no-https    (disable https; camera will not work on phone)
-  python server.py --save        (also append scans to scans_log.jsonl)
-"""
 
 import argparse
 import ipaddress
